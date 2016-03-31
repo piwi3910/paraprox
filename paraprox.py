@@ -35,9 +35,13 @@ class ParaproxHTTPRequestHandler(BaseHTTPRequestHandler):
     def traverse_response(self):
         self.host = self.headers.get('host')
         assert isinstance(self.host, str)
-        self.content_length = int(self.headers.get('content-length'))
 
-        body = self.rfile if self.content_length else None
+        body = None
+        self.content_length = self.headers.get('content-length')
+        if self.content_length is not None:
+            self.content_length = int(self.content_length)
+            if self.content_length > 0:
+                body = self.rfile  # We have a content to send, so set body as read file.
 
         host_conn = HTTPConnection(self.host)
 

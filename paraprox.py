@@ -66,7 +66,7 @@ class ParaproxHTTPRequestHandler(BaseHTTPRequestHandler):
             host_conn.request(self.command, self.path, body, self.headers)
             self.host_response = host_conn.getresponse()
             self.traverse_response()
-        except RemoteDisconnected or BrokenPipeError:
+        except (RemoteDisconnected, BrokenPipeError):
             self.log_message('Disconnected.')
         finally:
             host_conn.close()

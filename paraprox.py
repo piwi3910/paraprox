@@ -1,3 +1,5 @@
+#!/usr/bin/python
+
 from http.client import HTTPResponse
 from socket import SocketIO
 from socketserver import ThreadingMixIn

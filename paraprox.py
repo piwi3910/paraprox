@@ -49,16 +49,25 @@ class ParaproxHTTPRequestHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
 
-    def traverse_request(self):
-        self.host = self.headers.get('host')
-        assert isinstance(self.host, str)
+    def parse_request(self):
+        if not super().parse_request():
+            return False
 
-        body = None
+        self.host = self.headers.get('host')
+        if not isinstance(self.host, str):
+            self.send_error(HTTPStatus.BAD_REQUEST, "Request must contain a 'host' header.")
+            return False
+
         self.content_length = self.headers.get('content-length')
         if self.content_length is not None:
             self.content_length = int(self.content_length)
-            if self.content_length > 0:
-                body = self.rfile  # We have a content to send, so set body as read file.
+
+        return True
+
+    def traverse_request(self):
+        body = None
+        if isinstance(self.content_length, int) and self.content_length > 0:
+            body = self.rfile  # We have a content to send, so set body as read file.
 
         host_conn = HTTPConnection(self.host)
         try:

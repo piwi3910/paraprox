@@ -8,10 +8,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from http.client import HTTPConnection, HTTPMessage, HTTPResponse, RemoteDisconnected
 from typing import Tuple, Union, Optional
 
+DEFAULT_SERVER_ADDRESS = ('127.0.0.1', 8880)
 __version__ = "0.1"
-
 _UNKNOWN = 'UNKNOWN'
-
 _MAX_BUFFER_SIZE = 16 * 1024
 
 
@@ -156,4 +155,4 @@ def run(server_address: Tuple[str, int]):
 
 
 if __name__ == '__main__':
-    run(('127.0.0.1', 8880))
+    run(DEFAULT_SERVER_ADDRESS)

@@ -1,5 +1,6 @@
 from http.client import HTTPResponse
 from socket import SocketIO
+from socketserver import ThreadingMixIn
 from typing import Tuple
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from http.client import HTTPConnection, HTTPMessage
@@ -80,8 +81,12 @@ class ParaproxHTTPRequestHandler(BaseHTTPRequestHandler):
                 s.write(v)
 
 
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    pass
+
+
 def run(server_address: Tuple[str, int]):
-    httpd = HTTPServer(server_address, ParaproxHTTPRequestHandler)
+    httpd = ThreadingHTTPServer(server_address, ParaproxHTTPRequestHandler)
     try:
         print('Server started at %s.' % repr(server_address))
         httpd.serve_forever()

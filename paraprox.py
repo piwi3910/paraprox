@@ -53,7 +53,7 @@ class ParaproxHTTPRequestHandler(BaseHTTPRequestHandler):
             self.traverse_response_headers()
             self.traverse_response_body()
         except BrokenPipeError:
-            self.log_message('Disconnected unexpectedly.')
+            self.log_message('Disconnected.')
             return
 
     def traverse_response_headers(self):

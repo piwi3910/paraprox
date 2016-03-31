@@ -29,7 +29,7 @@ class ParaproxHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.host = self.headers.get('host')
         assert isinstance(self.host, str)
-        self.content_length = self.headers.get('content-length')
+        self.content_length = int(self.headers.get('content-length'))
         self.traverse_response()
 
     def traverse_response(self):

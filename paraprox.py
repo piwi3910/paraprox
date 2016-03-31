@@ -35,12 +35,16 @@ class ParaproxHTTPRequestHandler(BaseHTTPRequestHandler):
 
         host_conn = HTTPConnection(self.host)
 
-        # Make a request to the host and get a response.
-        host_conn.request(self.command, self.path, body, self.headers)
-        self.host_response = host_conn.getresponse()
+        try:
+            # Make a request to the host and get a response.
+            host_conn.request(self.command, self.path, body, self.headers)
+            self.host_response = host_conn.getresponse()
 
-        self.traverse_response_headers()
-        self.traverse_response_body()
+            self.traverse_response_headers()
+            self.traverse_response_body()
+        except BrokenPipeError:
+            self.log_error('Connection [%s:%s] lost.' % self.client_address)
+            return
 
     def traverse_response_headers(self):
         hr = self.host_response

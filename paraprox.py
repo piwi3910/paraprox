@@ -1,11 +1,12 @@
 #!/usr/bin/python
 
 import sys
-from socket import SocketIO
+from http import HTTPStatus
+from socket import SocketIO, socket
 from socketserver import ThreadingMixIn
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from http.client import HTTPConnection, HTTPMessage, HTTPResponse
-from typing import Tuple
+from http.client import HTTPConnection, HTTPMessage, HTTPResponse, RemoteDisconnected
+from typing import Tuple, Union, Optional
 
 __version__ = "0.1"
 
@@ -19,20 +20,37 @@ class ParaproxHTTPRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def __init__(self, request, client_address, server):
-        self.host = _UNKNOWN  # type: str
+        self.host = None  # type: Optional[str]
         self.host_connection = None  # type: HTTPConnection
         self.headers = None  # type: HTTPMessage
-        self.content_length = _UNKNOWN  # type: int
+        self.content_length = _UNKNOWN  # type: Union[int, str]
         self.host_response = None  # type: HTTPResponse
         super().__init__(request, client_address, server)
 
-    def do_GET(self):
-        self.traverse_response()
+    def handle_one_request(self):
+        try:
+            self.raw_requestline = self.rfile.readline(65537)
+            if len(self.raw_requestline) > 65536:
+                self.requestline = ''
+                self.request_version = ''
+                self.command = ''
+                self.send_error(HTTPStatus.REQUEST_URI_TOO_LONG)
+                return
+            if not self.raw_requestline:
+                self.close_connection = True
+                return
+            if not self.parse_request():
+                # An error code has been sent, just exit
+                return
+            self.traverse_request()
+            self.wfile.flush()  # actually send the response if not already done.
+        except socket.timeout as e:
+            # a read or a write timed out.  Discard this connection
+            self.log_error("Request timed out: %r", e)
+            self.close_connection = True
+            return
 
-    def do_POST(self):
-        self.traverse_response()
-
-    def traverse_response(self):
+    def traverse_request(self):
         self.host = self.headers.get('host')
         assert isinstance(self.host, str)
 
@@ -44,17 +62,19 @@ class ParaproxHTTPRequestHandler(BaseHTTPRequestHandler):
                 body = self.rfile  # We have a content to send, so set body as read file.
 
         host_conn = HTTPConnection(self.host)
-
         try:
             # Make a request to the host and get a response.
             host_conn.request(self.command, self.path, body, self.headers)
             self.host_response = host_conn.getresponse()
-
-            self.traverse_response_headers()
-            self.traverse_response_body()
-        except BrokenPipeError:
+            self.traverse_response()
+        except RemoteDisconnected or BrokenPipeError:
             self.log_message('Disconnected.')
-            return
+        finally:
+            host_conn.close()
+
+    def traverse_response(self):
+        self.traverse_response_headers()
+        self.traverse_response_body()
 
     def traverse_response_headers(self):
         hr = self.host_response

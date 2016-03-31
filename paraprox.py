@@ -1,11 +1,10 @@
 #!/usr/bin/python
 
-from http.client import HTTPResponse
 from socket import SocketIO
 from socketserver import ThreadingMixIn
-from typing import Tuple
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from http.client import HTTPConnection, HTTPMessage
+from http.client import HTTPConnection, HTTPMessage, HTTPResponse
+from typing import Tuple
 
 __version__ = "0.1"
 

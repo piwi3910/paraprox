@@ -27,12 +27,16 @@ class ParaproxHTTPRequestHandler(BaseHTTPRequestHandler):
         super().__init__(request, client_address, server)
 
     def do_GET(self):
-        self.host = self.headers.get('host')
-        assert isinstance(self.host, str)
-        self.content_length = int(self.headers.get('content-length'))
+        self.traverse_response()
+
+    def do_POST(self):
         self.traverse_response()
 
     def traverse_response(self):
+        self.host = self.headers.get('host')
+        assert isinstance(self.host, str)
+        self.content_length = int(self.headers.get('content-length'))
+
         body = self.rfile if self.content_length else None
 
         host_conn = HTTPConnection(self.host)

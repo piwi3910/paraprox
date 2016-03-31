@@ -1,5 +1,6 @@
 #!/usr/bin/python
 
+import sys
 from socket import SocketIO
 from socketserver import ThreadingMixIn
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -84,6 +85,31 @@ class ParaproxHTTPRequestHandler(BaseHTTPRequestHandler):
                 if n < _MAX_BUFFER_SIZE:
                     v = memoryview(v)[:n].tobytes()
                 s.write(v)
+
+    def log_message(self, mformat, *args):
+        """Log an arbitrary message.
+
+        This is used by all other logging functions.  Override
+        it if you have specific logging wishes.
+
+        The first argument, FORMAT, is a format string for the
+        message to be logged.  If the format string contains
+        any % escapes requiring parameters, they should be
+        specified as subsequent arguments (it's just like
+        printf!).
+
+        The client ip and current date/time are prefixed to
+        every message.
+
+        """
+        sys.stderr.write("%s - - [%s] %s\n" %
+                         (self.address_string(),
+                          self.log_date_time_string(),
+                          mformat % args))
+
+    def address_string(self):
+        """Return the client address."""
+        return '%s:%s' % (self.client_address[0], self.client_address[1])
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):

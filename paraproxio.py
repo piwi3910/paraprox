@@ -1,8 +1,10 @@
 #!/usr/bin/python
 
 import asyncio
+import os
 import sys
 import time
+from urllib.parse import urlparse
 
 import aiohttp
 import aiohttp.hdrs
@@ -12,10 +14,13 @@ from aiohttp.streams import EmptyStreamReader
 
 DEFAULT_CHUNK_SIZE = 16 * 1024
 
+files_to_parallel = ['.iso', '.zip', '.rpm']
+
 
 class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
     async def handle_request(self, message: RawRequestMessage, payload):
-        self.log_message('%s %s' % (message.method, message.path))
+        self.keep_alive(True)
+        self.log_message('%s %s' % (message.method, message.path))  # TODO: integrate aiohttp logging.
 
         path = message.path
         method = message.method
@@ -31,20 +36,35 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
                     for name, value in host_resp.headers.items():
                         if name == 'CONTENT-ENCODING':
                             continue
+                        if name == 'TRANSFER-ENCODING':
+                            if value.lower() == 'chunked':
+                                client_res.enable_chunked_encoding()
                         client_res.add_header(name, value)
 
-                    client_res.headers['CONNECTION'] = 'keep-alive'
+                    if client_res.length is None and client_res.headers.get('TRANSFER-ENCODING') is None:
+                        client_res.autochunked = lambda: False
+
                     client_res.send_headers()
 
+                    # Send a payload.
                     while True:
                         chunk = await host_resp.content.read(DEFAULT_CHUNK_SIZE)
                         if not chunk:
                             break
                         client_res.write(chunk)
-                        # await client_res.write_eof()
+
+                    if client_res.chunked or client_res.autochunked():
+                        client_res.write_eof()
+
         except (aiohttp.ServerDisconnectedError, aiohttp.ClientResponseError):
             self.log_message("Connection error.")
             pass
+
+    @staticmethod
+    def is_file_to_parallel(path: str) -> bool:
+        pr = urlparse(path)  # type: ParseResult
+        path, ext = os.path.splitext(pr.path)
+        return ext.lower() in files_to_parallel
 
     def log_message(self, mformat, *args):
         """Log an arbitrary message.

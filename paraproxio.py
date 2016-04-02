@@ -28,14 +28,31 @@ def need_file_to_parallel(path: str) -> bool:
 
 
 def get_bytes_ranges(length, parts):
-    """ Get bytes ranges
-    parts = 5
+    """ Get bytes ranges """
+    ###################################################################################################
+    #
+    # length            = 89
+    # parts             = 4
+    # range_size        = length // parts = 89 // 4 = 22
+    # last_range_size   = range_size + length % parts = 22 + 89 % 4 = 22 + 1 = 23
+    #
+    # [<-----range_size----->|<-----range_size----->|<-----range_size----->|<---last_range_size---->|
+    # [**********************|**********************|**********************|**********************|*]
+    # 0                      22                     44                     66                    88 89
+    #
+    ###################################################################################################
+    #
+    # length            = 89
+    # parts             = 5
+    # range_size        = length // parts = 89 // 5 = 17
+    # last_range_size   = range_size + length % parts = 17 + 89 % 5 = 17 + 4 = 21
+    #
+    # [<--range_size--->|<--range_size--->|<--range_size--->|<--range_size--->|<--last_range_size--->|
+    # [*****************|*****************|*****************|*****************|*****************|****]
+    # 0                 17                34                51                68                85   89
+    #
+    ###################################################################################################
 
-    [****************|****************|****************|****************|********]
-     0               1<--range_size-->2                3                4        5
-                                                                             ^
-                                                                      last_range_size
-    """
     range_size = length // parts
     last_range_size = range_size + length % parts
     last_range_idx = parts - 1
@@ -74,6 +91,7 @@ class ParallelDownloader:
     async def download(self):
         bytes_ranges = get_bytes_ranges(self.file_length, self.parallels)
         print(bytes_ranges)
+
 
 
 class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):

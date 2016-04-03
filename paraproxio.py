@@ -241,7 +241,8 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
         session = aiohttp.ClientSession(headers=message.headers, loop=self._loop)
         try:
             async with session.request(message.method, message.path,
-                                       data=req_data) as host_resp:  # type: aiohttp.ClientResponse
+                                       data=req_data,
+                                       allow_redirects=False) as host_resp:  # type: aiohttp.ClientResponse
                 client_res = aiohttp.Response(
                     self.writer, host_resp.status, http_version=message.version)
 

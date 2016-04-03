@@ -189,7 +189,7 @@ class ParallelDownloader:
 
     def _create_download_dir(self):
         if not os.path.exists(self._download_dir):
-            os.mkdir(self._download_dir)
+            os.makedirs(self._download_dir)
 
 
 class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):

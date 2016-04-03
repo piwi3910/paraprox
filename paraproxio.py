@@ -6,7 +6,7 @@ import shutil
 import sys
 import time
 from asyncio import AbstractEventLoop
-from typing import Tuple, Callable
+from typing import Tuple, Callable, Optional
 from urllib.parse import urlparse
 
 import aiohttp
@@ -222,22 +222,15 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
 
     async def handle_request(self, message: RawRequestMessage, payload):
         self.keep_alive(True)
+        if not await self.process_parallel(message, payload):
+            await self.process_normally(message, payload)
 
+    async def process_normally(self, message: RawRequestMessage, payload):
+        """Process request normally."""
+        self.log_message('%s %s' % (message.method, message.path))  # TODO: integrate aiohttp logging.
         req_data = payload if not isinstance(payload, EmptyStreamReader) else None
 
-        if message.method == 'GET' and need_file_to_parallel(message.path):
-            file_length, accept_ranges = await self.get_file_info(message.path)
-            if accept_ranges and file_length is not None:
-                # Process parallel
-                # TODO: integrate aiohttp logging.
-                self.log_message('PARALLEL %s %s [%s bytes]' % (message.method, message.path, file_length))
-                await self.process_parallel(message, file_length)
-                return
-        # Process normally.
-        self.log_message('%s %s' % (message.method, message.path))  # TODO: integrate aiohttp logging.
-        await self.process_normally(message, req_data)
-
-    async def process_normally(self, message: RawRequestMessage, req_data):
+        # Request from a host.
         session = aiohttp.ClientSession(headers=message.headers, loop=self._loop)
         try:
             async with session.request(message.method, message.path,
@@ -276,33 +269,58 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
         finally:
             session.close()
 
-    async def process_parallel(self, message, file_length):
+    async def process_parallel(self, message: RawRequestMessage, payload) -> bool:
+        """Try process a request parallel. Returns True in case of processed parallel, otherwise False."""
+        # Checking the opportunity of parallel downloading.
+        if message.method != 'GET' or not need_file_to_parallel(message.path):
+            return False
+        head = await self.get_file_head(message.path)
+        if head is None:
+            return False
+        accept_ranges = head.get('accept-ranges').lower() == 'bytes'
+        if not accept_ranges:
+            return False
+        content_length = head.get('content-length')
+        if content_length is None:
+            return False
+        content_length = int(content_length)
+        if content_length <= 0:
+            return False
+
+        # All checks pass, start a parallel downloading.
+        # TODO: integrate aiohttp logging.
+        self.log_message('PARALLEL GET %s [%s bytes]' % (message.path, content_length))
+
+        # Get additional file info.
+        content_type = head.get('CONTENT-TYPE')
+
+        # Prepare a response to a client.
         client_res = aiohttp.Response(self.writer, 200, http_version=message.version)
-        client_res.add_header('CONTENT-LENGTH', str(file_length))
+        client_res.add_header('CONTENT-LENGTH', str(content_length))
+        if content_type:
+            client_res.add_header('CONTENT-TYPE', content_type)
         client_res.send_headers()
 
-        pd = ParallelDownloader(message.path, file_length, self.parallels, self._loop)
+        pd = ParallelDownloader(message.path, content_length, self.parallels, self._loop)
         try:
             await pd.download()
             await pd.read(lambda chunk: client_res.write(chunk))
         finally:
             await pd.clear()
 
-    async def get_file_info(self, path) -> Tuple[int, bool]:
+        return True
+
+    async def get_file_head(self, path: str) -> Optional[CIMultiDictProxy]:
         """Make a HEAD request to get a 'content-length' and 'accept-ranges' headers."""
         session = aiohttp.ClientSession(loop=self._loop)
         try:
             async with session.request('HEAD', path) as res:  # type: aiohttp.ClientResponse
-                hrh = res.headers  # type: CIMultiDictProxy
-                accept_ranges = hrh.get('accept-ranges').lower() == 'bytes'
-                file_length = hrh.get('content-length')
-                if file_length is not None:
-                    file_length = int(file_length)
-                return file_length, accept_ranges
+                return res.headers
         except (aiohttp.ServerDisconnectedError, aiohttp.ClientResponseError):
             self.log_message("Connection error.")
         finally:
             session.close()
+        return None
 
     def log_message(self, mformat, *args):
         """Log an arbitrary message.

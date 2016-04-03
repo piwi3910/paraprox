@@ -6,7 +6,7 @@ import shutil
 import sys
 import time
 from asyncio import AbstractEventLoop
-from typing import Tuple, Callable, Optional
+from typing import Tuple, Callable, Optional, List
 from urllib.parse import urlparse
 
 import aiohttp
@@ -31,7 +31,7 @@ def need_file_to_parallel(path: str) -> bool:
     return ext.lower() in files_to_parallel
 
 
-def get_bytes_ranges(length, parts):
+def get_bytes_ranges(length: int, parts: int) -> List[Tuple[int, int]]:
     """ Get bytes ranges """
     ###################################################################################################
     #

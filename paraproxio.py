@@ -10,7 +10,7 @@ from typing import Tuple, Callable, Optional, List
 from urllib.parse import urlparse
 
 import aiohttp
-import aiohttp.hdrs
+import aiohttp.hdrs as hdrs
 import aiohttp.server
 from aiohttp.log import server_logger, access_logger
 from aiohttp.multidict import CIMultiDictProxy
@@ -67,10 +67,6 @@ def get_bytes_ranges(length: int, parts: int) -> List[Tuple[int, int]]:
     last_range_offset = last_range_idx * range_size
     bytes_ranges.append((last_range_offset, last_range_offset + last_range_size - 1))
     return bytes_ranges
-
-
-class PartDownloadError(Exception):
-    pass
 
 
 class Downloader:
@@ -220,14 +216,24 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
         self._loop = loop
         self.parallels = parallels
 
+    def check_request(self, message: RawRequestMessage):
+        if message.method == hdrs.METH_CONNECT:
+            self.handle_error(status=405, message=message)
+            raise UnsupportedError('Method \'%s\' is not supported.' % message.method)
+
     async def handle_request(self, message: RawRequestMessage, payload):
-        self.keep_alive(True)
-        if not await self.process_parallel(message, payload):
-            await self.process_normally(message, payload)
+        try:
+            self.check_request(message)
+            self.keep_alive(True)
+            if not await self.process_parallel(message, payload):
+                await self.process_normally(message, payload)
+        except ParaproxError as err:
+            request_repr = "{!s} {!r}".format(message.method, message.path)
+            self.log_message("Unable to {}. {!r}".format(request_repr, err))
 
     async def process_normally(self, message: RawRequestMessage, payload):
         """Process request normally."""
-        self.log_message('%s %s' % (message.method, message.path))  # TODO: integrate aiohttp logging.
+        self.log_message("{!s} {!r}".format(message.method, message.path))  # TODO: integrate aiohttp logging.
         req_data = payload if not isinstance(payload, EmptyStreamReader) else None
 
         # Request from a host.
@@ -241,14 +247,14 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
 
                 # Process host response headers.
                 for name, value in host_resp.headers.items():
-                    if name == 'CONTENT-ENCODING':
+                    if name == hdrs.CONTENT_ENCODING:
                         continue
-                    if name == 'TRANSFER-ENCODING':
+                    if name == hdrs.TRANSFER_ENCODING:
                         if value.lower() == 'chunked':
                             client_res.enable_chunked_encoding()
                     client_res.add_header(name, value)
 
-                if client_res.length is None and client_res.headers.get('TRANSFER-ENCODING') is None:
+                if client_res.length is None and client_res.headers.get(hdrs.TRANSFER_ENCODING) is None:
                     client_res.autochunked = lambda: False
 
                 # Send headers to the client.
@@ -272,15 +278,15 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
     async def process_parallel(self, message: RawRequestMessage, payload) -> bool:
         """Try process a request parallel. Returns True in case of processed parallel, otherwise False."""
         # Checking the opportunity of parallel downloading.
-        if message.method != 'GET' or not need_file_to_parallel(message.path):
+        if message.method != hdrs.METH_HEAD or not need_file_to_parallel(message.path):
             return False
         head = await self.get_file_head(message.path)
         if head is None:
             return False
-        accept_ranges = head.get('accept-ranges').lower() == 'bytes'
+        accept_ranges = head.get(hdrs.ACCEPT_RANGES).lower() == 'bytes'
         if not accept_ranges:
             return False
-        content_length = head.get('content-length')
+        content_length = head.get(hdrs.CONTENT_LENGTH)
         if content_length is None:
             return False
         content_length = int(content_length)
@@ -292,13 +298,13 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
         self.log_message('PARALLEL GET %s [%s bytes]' % (message.path, content_length))
 
         # Get additional file info.
-        content_type = head.get('CONTENT-TYPE')
+        content_type = head.get(hdrs.CONTENT_TYPE)
 
         # Prepare a response to a client.
         client_res = aiohttp.Response(self.writer, 200, http_version=message.version)
-        client_res.add_header('CONTENT-LENGTH', str(content_length))
+        client_res.add_header(hdrs.CONTENT_LENGTH, str(content_length))
         if content_type:
-            client_res.add_header('CONTENT-TYPE', content_type)
+            client_res.add_header(hdrs.CONTENT_TYPE, content_type)
         client_res.send_headers()
 
         pd = ParallelDownloader(message.path, content_length, self.parallels, self._loop)
@@ -314,7 +320,7 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
         """Make a HEAD request to get a 'content-length' and 'accept-ranges' headers."""
         session = aiohttp.ClientSession(loop=self._loop)
         try:
-            async with session.request('HEAD', path) as res:  # type: aiohttp.ClientResponse
+            async with session.request(hdrs.METH_HEAD, path) as res:  # type: aiohttp.ClientResponse
                 return res.headers
         except (aiohttp.ServerDisconnectedError, aiohttp.ClientResponseError):
             self.log_message("Connection error.")
@@ -360,6 +366,18 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
     monthname = [None,
                  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+
+class ParaproxError(Exception):
+    pass
+
+
+class PartDownloadError(ParaproxError):
+    pass
+
+
+class UnsupportedError(ParaproxError):
+    pass
 
 
 def run():

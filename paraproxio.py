@@ -2,9 +2,11 @@
 
 import asyncio
 import os
+import shutil
 import sys
 import time
-from typing import Tuple
+from asyncio import AbstractEventLoop
+from typing import Tuple, Callable
 from urllib.parse import urlparse
 
 import aiohttp
@@ -15,10 +17,12 @@ from aiohttp.multidict import CIMultiDictProxy
 from aiohttp.protocol import RawRequestMessage
 from aiohttp.streams import EmptyStreamReader
 
-DEFAULT_CHUNK_SIZE = 16 * 1024
+DEFAULT_CHUNK_SIZE = 64 * 1024
 DEFAULT_PARALLELS = 10
 
-files_to_parallel = ['.iso', '.zip', '.rpm']
+DEFAULT_BUFFER_DIR = '.paraprox_buffer'
+
+files_to_parallel = ['.iso', '.zip', '.rpm', '.gz']
 
 
 def need_file_to_parallel(path: str) -> bool:
@@ -65,38 +69,132 @@ def get_bytes_ranges(length, parts):
     return bytes_ranges
 
 
+class PartDownloadError(Exception):
+    pass
+
+
 class Downloader:
-    def __init__(self, path: str, bytes_range: Tuple[int, int], wfile):
-        self.path = path
-        self.bytes_range = bytes_range
-        self.wfile = wfile
+    def __init__(self, path: str, bytes_range: Tuple[int, int], buffer_file_path, loop: AbstractEventLoop = None):
+        self._path = path
+        self._bytes_range = bytes_range
+        self.buffer_file_path = buffer_file_path
+        self._loop = loop if loop is not None else asyncio.get_event_loop()
+        self._buffer_file_length = bytes_range[1] - bytes_range[0] + 1
+        loop.run_in_executor(None, self._create_buffer_file)
+        self._headers = {'Range': 'bytes=%s-%s' % (self._bytes_range[0], self._bytes_range[1])}
 
     async def download(self):
-        pass
+        session = aiohttp.ClientSession(loop=self._loop, headers=self._headers)
+        try:
+            async with session.request('GET', self._path) as res:  # type: aiohttp.ClientResponse
+                if res.status != 206:
+                    raise PartDownloadError()
+                hrh = res.headers  # type: CIMultiDictProxy
+                # TODO: check headers.
+
+                # Read content by chunks and write to the buffer file.
+                while True:
+                    chunk = await res.content.read(DEFAULT_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    await self._write_chunk(chunk)
+                await self._flush_and_release()
+
+        except (aiohttp.ServerDisconnectedError, aiohttp.ClientResponseError):
+            print("Connection error.")  # TODO: logging.
+        finally:
+            session.close()
+
+    async def _write_chunk(self, chunk):
+        # TODO: assert file is created before writing.
+        await self._run_nonblocking(lambda: self._buffer_file.write(chunk))
+
+    async def _flush_and_release(self):
+        def flush_and_release():
+            self._buffer_file.flush()
+            self._buffer_file.close()
+            del self._buffer_file
+
+        await self._run_nonblocking(flush_and_release)
+
+    async def _run_nonblocking(self, func):
+        await self._loop.run_in_executor(None, lambda: func())
+
+    def _create_buffer_file(self):
+        f = open(self.buffer_file_path, 'xb')
+        f.seek(self._buffer_file_length - 1)
+        f.write(b'0')
+        f.flush()
+        f.seek(0)
+        self._buffer_file = f
+
+    def __repr__(self, *args, **kwargs):
+        return '<Downloader: [{!s}-{!s}] {!r}>'.format(self._bytes_range[0], self._bytes_range[1], self._path)
 
 
 class ParallelDownloader:
     def __init__(
             self,
-            writer,
             path: str,
             file_length: int,
-            parallels: int = DEFAULT_PARALLELS):
+            parallels: int = DEFAULT_PARALLELS,
+            loop: AbstractEventLoop = None,
+            buffer_dir: str = DEFAULT_BUFFER_DIR):
         assert parallels > 1
-        self.writer = writer
-        self.path = path
-        self.file_length = file_length
-        self.parallels = parallels
+        self._path = path
+        self._file_length = file_length
+        self._parallels = parallels
+        self._loop = loop if loop is not None else asyncio.get_event_loop()
+        self._filename = None  # type: str
+        self._download_dir = os.path.join(buffer_dir, str(self._loop.time()).replace('.', '_'))
+        self._create_download_dir()
+        self._downloaders = []
 
     async def download(self):
-        bytes_ranges = get_bytes_ranges(self.file_length, self.parallels)
-        print(bytes_ranges)
+        bytes_ranges = get_bytes_ranges(self._file_length, self._parallels)
 
+        # Create a downloader for each bytes range.
+        for i, bytes_range in enumerate(bytes_ranges):
+            filename = '{:02}_{!s}-{!s}.tmp'.format(i, bytes_range[0], bytes_range[1])
+            buffer_file_path = os.path.join(self._download_dir, filename)
+            self._downloaders.append(Downloader(self._path, bytes_range, buffer_file_path, self._loop))
+
+        # Start downloaders.
+        downloads = []
+        for downloader in self._downloaders:
+            downloads.append(asyncio.ensure_future(downloader.download(), loop=self._loop))
+
+        # Waiting for all downloads to complete.
+        await asyncio.wait(downloads, loop=self._loop)
+
+    async def read(self, callback: Callable[[bytearray], None]):
+        chunk = bytearray(DEFAULT_CHUNK_SIZE)
+        chunk_size = len(chunk)
+        for downloader in self._downloaders:
+            with open(downloader.buffer_file_path, 'rb') as file:
+                while True:
+                    r = await self._run_nonblocking(lambda: file.readinto(chunk))
+                    if not r:
+                        break
+                    if r < chunk_size:
+                        callback(memoryview(chunk)[:r].tobytes())
+                    else:
+                        callback(chunk)
+
+    async def clear(self):
+        await self._run_nonblocking(lambda: shutil.rmtree(self._download_dir))
+
+    async def _run_nonblocking(self, func):
+        return await self._loop.run_in_executor(None, lambda: func())
+
+    def _create_download_dir(self):
+        if not os.path.exists(self._download_dir):
+            os.mkdir(self._download_dir)
 
 
 class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
     def __init__(
-            self, *, loop=None,
+            self, *, loop: AbstractEventLoop = None,
             keep_alive=75,
             keep_alive_on=True,
             timeout=0,
@@ -133,7 +231,7 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
                 # Process parallel
                 # TODO: integrate aiohttp logging.
                 self.log_message('PARALLEL %s %s [%s bytes]' % (message.method, message.path, file_length))
-                await self.process_parallel(message.path, file_length)
+                await self.process_parallel(message, file_length)
                 return
         # Process normally.
         self.log_message('%s %s' % (message.method, message.path))  # TODO: integrate aiohttp logging.
@@ -177,9 +275,17 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
         finally:
             session.close()
 
-    async def process_parallel(self, path, file_length):
-        pd = ParallelDownloader(self.writer, path, file_length, self.parallels)
-        await pd.download()
+    async def process_parallel(self, message, file_length):
+        client_res = aiohttp.Response(self.writer, 200, http_version=message.version)
+        client_res.add_header('CONTENT-LENGTH', str(file_length))
+        client_res.send_headers()
+
+        pd = ParallelDownloader(message.path, file_length, self.parallels, self._loop)
+        try:
+            await pd.download()
+            await pd.read(lambda chunk: client_res.write(chunk))
+        finally:
+            await pd.clear()
 
     async def get_file_info(self, path) -> Tuple[int, bool]:
         """Make a HEAD request to get a 'content-length' and 'accept-ranges' headers."""
@@ -237,7 +343,7 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
                  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 
-if __name__ == '__main__':
+def run():
     loop = asyncio.get_event_loop()
     f = loop.create_server(
         lambda: HttpRequestHandler(loop=loop, debug=True, keep_alive=75),
@@ -248,3 +354,7 @@ if __name__ == '__main__':
         loop.run_forever()
     except KeyboardInterrupt:
         pass
+
+
+if __name__ == '__main__':
+    run()

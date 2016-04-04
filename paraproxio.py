@@ -2,10 +2,11 @@
 
 import sys
 
-req_ver = (3, 5)
+req_ver = (3, 6)
 if sys.version_info < req_ver:
     print('Minimum Python/{0[0]}.{0[1]} required. You run this script with Python/{1[0]}.{1[1]}.'.format(
-        req_ver, sys.version_info))
+        req_ver, sys.version_info),
+        file=sys.stderr)
     exit(1)
 
 import asyncio
@@ -25,7 +26,9 @@ try:
     from aiohttp.protocol import RawRequestMessage
     from aiohttp.streams import EmptyStreamReader
 except ImportError as err:
-    print("Required module '{0}' not found. Try to run 'pip install {0}' to install it.".format(err.name))
+    print(
+        "Required module '{0}' not found. Try to run 'pip install {0}' to install it.".format(err.name),
+        file=sys.stderr)
     exit(1)
 
 DEFAULT_CHUNK_SIZE = 64 * 1024

@@ -2,7 +2,7 @@
 
 import sys
 
-req_ver = (3, 6)
+req_ver = (3, 5)
 if sys.version_info < req_ver:
     print('Minimum Python/{0[0]}.{0[1]} required. You run this script with Python/{1[0]}.{1[1]}.'.format(
         req_ver, sys.version_info),

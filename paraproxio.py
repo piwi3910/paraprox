@@ -14,8 +14,8 @@ import logging
 import os
 import shutil
 
-from asyncio import AbstractEventLoop
-from typing import Tuple, Callable, Optional, List
+from asyncio import AbstractEventLoop, Future
+from typing import Tuple, Callable, Optional, List, Set, FrozenSet
 from urllib.parse import urlparse
 
 try:
@@ -90,7 +90,7 @@ def get_bytes_ranges(length: int, parts: int) -> List[Tuple[int, int]]:
     return bytes_ranges
 
 
-class Downloader:
+class RangeDownloader:
     def __init__(self, path: str, bytes_range: Tuple[int, int], buffer_file_path, loop: AbstractEventLoop = None):
         self._path = path
         self._bytes_range = bytes_range
@@ -105,7 +105,7 @@ class Downloader:
         try:
             async with session.request('GET', self._path) as res:  # type: aiohttp.ClientResponse
                 if res.status != 206:
-                    raise PartDownloadError()
+                    raise PartDownloadError('Expected status code 206, but {!s} received.', res.status)
                 hrh = res.headers  # type: CIMultiDictProxy
                 # TODO: check headers.
 
@@ -146,7 +146,13 @@ class Downloader:
         self._buffer_file = f
 
     def __repr__(self, *args, **kwargs):
-        return '<Downloader: [{!s}-{!s}] {!r}>'.format(self._bytes_range[0], self._bytes_range[1], self._path)
+        return '<RangeDownloader: [{0[0]!s}-{0[1]!s}] {!r}>'.format(self._bytes_range, self._path)
+
+
+NOT_STARTED = 'NOT STARTED'
+DOWNLOADING = 'DOWNLOADING'
+DOWNLOADED = 'DOWNLOADED'
+CANCELLED = 'CANCELLED'
 
 
 class ParallelDownloader:
@@ -158,31 +164,53 @@ class ParallelDownloader:
             loop: AbstractEventLoop = None,
             buffer_dir: str = DEFAULT_BUFFER_DIR):
         assert parallels > 1
+
         self._path = path
         self._file_length = file_length
         self._parallels = parallels
         self._loop = loop if loop is not None else asyncio.get_event_loop()
         self._filename = None  # type: str
         self._download_dir = os.path.join(buffer_dir, str(self._loop.time()).replace('.', '_'))
+        self._downloaders = set()  # type: Set[RangeDownloader]
+        self._downloads = set()  # type: Set[Future]
+        self._state = NOT_STARTED
+
         self._create_download_dir()
-        self._downloaders = []
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @property
+    def downloads(self) -> FrozenSet[Future]:
+        return frozenset(self._downloads)
 
     async def download(self):
+        assert self._state == NOT_STARTED
+        self._state = DOWNLOADING
+
+        # Calculate bytes ranges.
         bytes_ranges = get_bytes_ranges(self._file_length, self._parallels)
 
         # Create a downloader for each bytes range.
         for i, bytes_range in enumerate(bytes_ranges):
-            filename = '{:02}_{!s}-{!s}.tmp'.format(i, bytes_range[0], bytes_range[1])
+            filename = '{idx:02}_{range[0]!s}-{range[1]!s}.tmp'.format(idx=i, range=bytes_range)
             buffer_file_path = os.path.join(self._download_dir, filename)
-            self._downloaders.append(Downloader(self._path, bytes_range, buffer_file_path, self._loop))
+            self._downloaders.add(RangeDownloader(self._path, bytes_range, buffer_file_path, self._loop))
 
         # Start downloaders.
-        downloads = []
         for downloader in self._downloaders:
-            downloads.append(asyncio.ensure_future(downloader.download(), loop=self._loop))
+            self._downloads.add(asyncio.ensure_future(downloader.download(), loop=self._loop))
 
         # Waiting for all downloads to complete.
-        await asyncio.wait(downloads, loop=self._loop)
+        try:
+            await asyncio.wait(self._downloads, loop=self._loop)
+        except:
+            self.cancel()
+            raise
+        else:
+            # OK. All done.
+            self._state = DOWNLOADED
 
     async def read(self, callback: Callable[[bytearray], None]):
         chunk = bytearray(DEFAULT_CHUNK_SIZE)
@@ -198,8 +226,21 @@ class ParallelDownloader:
                     else:
                         callback(chunk)
 
+    def cancel(self):
+        if self._state != DOWNLOADING:
+            return
+        self._state = CANCELLED
+        for download in self._downloads:  # type: Future
+            download.cancel()
+        self._downloads.clear()
+
     async def clear(self):
-        await self._run_nonblocking(lambda: shutil.rmtree(self._download_dir))
+        if self._state not in (DOWNLOADED, CANCELLED):
+            return
+        await self._clear()
+
+    async def _clear(self):
+        await self._run_nonblocking(lambda: shutil.rmtree(self._download_dir, ignore_errors=True))
 
     async def _run_nonblocking(self, func):
         return await self._loop.run_in_executor(None, lambda: func())
@@ -207,6 +248,9 @@ class ParallelDownloader:
     def _create_download_dir(self):
         if not os.path.exists(self._download_dir):
             os.makedirs(self._download_dir)
+
+    def __repr__(self, *args, **kwargs):
+        return '<ParallelDownloader: {!r}>'.format(self._path)
 
 
 class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
@@ -285,10 +329,8 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
                 client_res.send_headers()
 
                 # Send a payload.
-                read = 0
                 while True:
                     chunk = await host_resp.content.read(DEFAULT_CHUNK_SIZE)
-                    read += len(chunk)
                     if not chunk:
                         break
                     client_res.write(chunk)
@@ -319,7 +361,7 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
 
         # All checks pass, start a parallel downloading.
         # TODO: log as access, not as debug.
-        self.log_debug('PARALLEL GET %s [%s bytes]' % (message.path, content_length))
+        self.log_debug("PARALLEL GET {!r} [{!s} bytes]".format(message.path, content_length))
 
         # Get additional file info.
         content_type = head.get(hdrs.CONTENT_TYPE)
@@ -335,6 +377,9 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
         try:
             await pd.download()
             await pd.read(lambda chunk: client_res.write(chunk))
+        except:
+            self.log_debug("CANCELLED PARALLEL GET {!r}.".format(message.path))
+            raise
         finally:
             await pd.clear()
 

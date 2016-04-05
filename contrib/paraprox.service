@@ -1,0 +1,11 @@
+[Unit]
+Description=Paraprox Service
+After=multi-user.target
+
+[Service]
+Type=idle
+ExecStart=/usr/bin/python3.5 /usr/bin/paraproxio.py -H 0.0.0.0 -P 8880 --parallels 32 --logs_dir /var/log/paraprox/access.log
+
+[Install]
+WantedBy=multi-user.target
+

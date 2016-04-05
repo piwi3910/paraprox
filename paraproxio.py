@@ -1,5 +1,7 @@
 #!/usr/bin/python
 
+__version__ = '1.0'
+
 import sys
 
 req_ver = (3, 5)
@@ -13,6 +15,7 @@ import asyncio
 import logging
 import os
 import shutil
+import argparse
 
 from asyncio import AbstractEventLoop, Future
 from asyncio.futures import CancelledError
@@ -31,6 +34,9 @@ except ImportError as err:
         "Required module '{0}' not found. Try to run 'pip install {0}' to install it.".format(err.name),
         file=sys.stderr)
     exit(1)
+
+DEFAULT_HOST = '127.0.0.1'
+DEFAULT_PORT = 8880
 
 DEFAULT_CHUNK_DOWNLOAD_TIMEOUT = 10
 DEFAULT_CHUNK_SIZE = 64 * 1024
@@ -196,7 +202,9 @@ class ParallelDownloader:
             self,
             path: str,
             file_length: int,
+            *,
             parallels: int = DEFAULT_PARALLELS,
+            chunk_size: int = DEFAULT_CHUNK_SIZE,
             loop: AbstractEventLoop = None,
             buffer_dir: str = DEFAULT_BUFFER_DIR):
         assert parallels > 1
@@ -204,6 +212,7 @@ class ParallelDownloader:
         self._path = path
         self._file_length = file_length
         self._parallels = parallels
+        self._chunk_size = chunk_size
         self._loop = loop if loop is not None else asyncio.get_event_loop()
         self._filename = None  # type: str
         self._download_dir = os.path.join(buffer_dir, str(self._loop.time()).replace('.', '_'))
@@ -233,7 +242,7 @@ class ParallelDownloader:
             filename = '{idx:02}_{range[0]!s}-{range[1]!s}.tmp'.format(idx=i, range=bytes_range)
             buffer_file_path = os.path.join(self._download_dir, filename)
             self._downloaders.append(RangeDownloader(
-                self._path, bytes_range, buffer_file_path, loop=self._loop))
+                self._path, bytes_range, buffer_file_path, loop=self._loop, chunk_size=self._chunk_size))
 
         # Start downloaders.
         for downloader in self._downloaders:
@@ -256,7 +265,7 @@ class ParallelDownloader:
             self._state = DOWNLOADED
 
     async def read(self, callback: Callable[[bytearray], None]):
-        chunk = bytearray(DEFAULT_CHUNK_SIZE)
+        chunk = bytearray(self._chunk_size)
         chunk_size = len(chunk)
         for downloader in self._downloaders:
             with open(downloader.buffer_file_path, 'rb') as file:
@@ -307,6 +316,7 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
             debug=False,
             log=None,
             parallels: int = DEFAULT_PARALLELS,
+            chunk_size: int = DEFAULT_CHUNK_SIZE,
             **kwargs):
         super().__init__(
             loop=loop,
@@ -321,7 +331,8 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
             **kwargs)
 
         self._loop = loop
-        self.parallels = parallels
+        self._parallels = parallels
+        self._chunk_size = chunk_size
 
     def check_request(self, message: RawRequestMessage):
         if message.method == hdrs.METH_CONNECT:
@@ -372,7 +383,7 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
 
                 # Send a payload.
                 while True:
-                    chunk = await host_resp.content.read(DEFAULT_CHUNK_SIZE)
+                    chunk = await host_resp.content.read(self._chunk_size)
                     if not chunk:
                         break
                     client_res.write(chunk)
@@ -415,7 +426,8 @@ class HttpRequestHandler(aiohttp.server.ServerHttpProtocol):
             client_res.add_header(hdrs.CONTENT_TYPE, content_type)
         client_res.send_headers()
 
-        pd = ParallelDownloader(message.path, content_length, self.parallels, self._loop)
+        pd = ParallelDownloader(message.path, content_length,
+                                parallels=self._parallels, chunk_size=self._chunk_size, loop=self._loop)
         try:
             await pd.download()
             await pd.read(lambda chunk: client_res.write(chunk))
@@ -457,9 +469,9 @@ class UnsupportedError(ParaproxError):
     pass
 
 
-def setup_dirs(buffer_dir: str, logs_dir: str):
-    os.makedirs(buffer_dir, exist_ok=True)
-    os.makedirs(logs_dir, exist_ok=True)
+def setup_dirs(*dirs):
+    for d in dirs:
+        os.makedirs(d, exist_ok=True)
 
 
 def setup_logging(logs_dir: str, server_log_filename: str, access_log_filename: str):
@@ -485,9 +497,26 @@ def setup_logging(logs_dir: str, server_log_filename: str, access_log_filename: 
     access_logger.addHandler(alfh)
 
 
+def get_args():
+    parser = argparse.ArgumentParser(prog="paraprox",
+                                     description="An HTTP proxy with a parallel downloading of big files.")
+    parser.add_argument("-H", "--host", type=str, default=DEFAULT_HOST, help="host address")
+    parser.add_argument("-P", "--port", type=int, default=DEFAULT_PORT, help="port")
+    parser.add_argument("--parallels", type=int, default=DEFAULT_PARALLELS, help="parallel downloads of a big file")
+    parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE, help="chunk size")
+    parser.add_argument("--buffer-dir", type=str, default=DEFAULT_BUFFER_DIR, help="buffer dir")
+    parser.add_argument("--logs-dir", type=str, default=DEFAULT_LOGS_DIR, help="logs dir")
+    parser.add_argument("--debug", action="store_true", help="enable debug information in the stdout")
+    parser.add_argument("--version", action="version", version="Paraprox/" + __version__)
+    return parser.parse_args()
+
+
 def run():
-    setup_dirs(DEFAULT_BUFFER_DIR, DEFAULT_LOGS_DIR)
-    setup_logging(DEFAULT_LOGS_DIR, DEFAULT_SERVER_LOG_FILENAME, DEFAULT_ACCESS_LOG_FILENAME)
+    args = get_args()
+
+    setup_dirs(args.buffer_dir, args.logs_dir)
+    setup_logging(args.logs_dir, DEFAULT_SERVER_LOG_FILENAME, DEFAULT_ACCESS_LOG_FILENAME)
+
     loop = asyncio.get_event_loop()
 
     def create_http_request_handler():
@@ -495,13 +524,15 @@ def run():
             loop=loop,
             logger=server_logger,
             access_log=access_logger,
-            debug=True,
+            debug=args.debug,
+            parallels=args.parallels,
+            chunk_size=args.chunk_size,
             keep_alive=75)
 
-    f = loop.create_server(create_http_request_handler, '127.0.0.1', '8880')
+    f = loop.create_server(create_http_request_handler, args.host, args.port)
 
     srv = loop.run_until_complete(f)
-    print('serving on', srv.sockets[0].getsockname())
+    print('Paraprox serving on', srv.sockets[0].getsockname())
     try:
         loop.run_forever()
     except KeyboardInterrupt:
